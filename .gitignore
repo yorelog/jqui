@@ -1,0 +1,14 @@
+gpui-kit.d.ts
+node_modules/
+dist/
+staging/
+release/
+.research/
+xh
+xh.exe
+jq
+jq.exe
+*.bak
+.DS_Store
+Thumbs.db
+*.log

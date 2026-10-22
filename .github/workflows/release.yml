@@ -1,0 +1,211 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag (must match gpui-shell.json version), e.g. v0.1.0"
+        required: true
+        default: "v0.1.0"
+      gpui_shell_version:
+        description: "gpui-shell release tag, e.g. v0.8.0; use latest to follow releases"
+        required: false
+        default: "latest"
+
+permissions:
+  contents: write
+
+env:
+  GPUI_SHELL_VERSION: ${{ github.event.inputs.gpui_shell_version || 'latest' }}
+  RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag matches manifest version
+        run: |
+          node -e "const m=require('./gpui-shell.json'); const tag=process.env.RELEASE_TAG.replace(/^v/,''); if(tag!==m.version){console.error('Tag '+process.env.RELEASE_TAG+' does not match manifest version '+m.version); process.exit(1);}"
+
+  windows:
+    needs: validate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install gpui-shell
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          $version = $env:GPUI_SHELL_VERSION
+          if ([string]::IsNullOrWhiteSpace($version) -or $version -eq "latest") {
+            $base = "https://github.com/longbridge/gpui-kit/releases/latest/download"
+          } else {
+            $base = "https://github.com/longbridge/gpui-kit/releases/download/$version"
+          }
+          $asset = "gpui-shell-x86_64-pc-windows-msvc.zip"
+          Invoke-WebRequest -Uri "$base/$asset" -OutFile $asset
+          Invoke-WebRequest -Uri "$base/$asset.sha256" -OutFile "$asset.sha256"
+          $expected = ((Get-Content "$asset.sha256" -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          $actual = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "gpui-shell checksum mismatch" }
+          Expand-Archive -Path $asset -DestinationPath gpui-shell-bin -Force
+          $exe = Get-ChildItem gpui-shell-bin -Recurse -Filter gpui-shell.exe | Select-Object -First 1
+          $exe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & $exe.FullName --version
+
+      - name: Stage the application with native tools
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force staging | Out-Null
+          Copy-Item main.js,gpui-shell.json staging
+          Copy-Item lib -Destination staging -Recurse
+          Copy-Item icons -Destination staging -Recurse
+          node scripts/fetch-tools.mjs --platform windows --arch x64 --out staging
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check
+        shell: pwsh
+        run: |
+          gpui-shell check -d staging
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Bundle
+        shell: pwsh
+        run: |
+          gpui-shell bundle -d staging --platform windows --out dist --icon icons/app-icon.png
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.zip
+          if-no-files-found: error
+
+  macos:
+    needs: validate
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install gpui-shell
+        run: |
+          set -euo pipefail
+          curl -fsSL https://gpui-kit.com/shell/install.sh -o "$RUNNER_TEMP/gpui-install.sh"
+          GPUI_SHELL_VERSION="$GPUI_SHELL_VERSION" sh "$RUNNER_TEMP/gpui-install.sh"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/gpui-shell" --version
+
+      - name: Stage the application with universal tools
+        run: |
+          set -euo pipefail
+          mkdir -p staging
+          cp -R main.js gpui-shell.json lib icons staging/
+          node scripts/fetch-tools.mjs --platform macos --arch universal --out staging
+
+      - name: Check
+        run: gpui-shell check -d staging
+
+      - name: Bundle
+        run: |
+          set -euo pipefail
+          gpui-shell bundle -d staging --platform macos --out dist --icon icons/app-icon.png
+          VERSION=$(node -p "require('./gpui-shell.json').version")
+          ditto -c -k --sequesterRsrc --keepParent "dist/Jqui.app" "dist/Jqui-${VERSION}-macos-universal.zip"
+          ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.zip
+          if-no-files-found: error
+
+  linux:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libwayland-dev \
+            libxkbcommon-x11-dev \
+            libx11-xcb-dev \
+            libssl-dev \
+            libzstd-dev \
+            libasound2-dev \
+            libfontconfig-dev \
+            libvulkan1
+
+      - name: Install gpui-shell
+        run: |
+          set -euo pipefail
+          curl -fsSL https://gpui-kit.com/shell/install.sh -o "$RUNNER_TEMP/gpui-install.sh"
+          GPUI_SHELL_VERSION="$GPUI_SHELL_VERSION" sh "$RUNNER_TEMP/gpui-install.sh"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/gpui-shell" --version
+
+      - name: Stage the application with native tools
+        run: |
+          set -euo pipefail
+          mkdir -p staging
+          cp -R main.js gpui-shell.json lib icons staging/
+          node scripts/fetch-tools.mjs --platform linux --arch x64 --out staging
+
+      - name: Bundle
+        run: |
+          set -euo pipefail
+          gpui-shell bundle -d staging --platform linux --out dist --icon icons/app-icon.png \
+            --download-url "https://github.com/${{ github.repository }}/releases/latest/download"
+          ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            dist/*.tar.gz
+            dist/install.sh
+          if-no-files-found: error
+
+  release:
+    needs: [validate, windows, macos, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Write checksums
+        run: |
+          set -euo pipefail
+          cd release
+          ls -lh
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
+          name: Jqui ${{ env.RELEASE_TAG }}
+          files: release/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

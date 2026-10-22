@@ -1,0 +1,35 @@
+{
+  "id": "local.jqui",
+  "name": "Jqui",
+  "version": "0.1.0",
+  "shell-version": "0.8.0",
+  "entry": "main.js",
+  "window": {
+    "width": 1280,
+    "height": 840
+  },
+  "capabilities": {
+    "fs": {
+      "read": ["${pluginDir}", "${dataDir}"],
+      "write": ["${dataDir}"],
+      "execute": "*"
+    },
+    "network": {
+      "http": [
+        {
+          "scheme": "https",
+          "host": "api.github.com",
+          "methods": ["GET"],
+          "path_prefixes": [
+            "/repos/ducaale/xh/releases/latest",
+            "/repos/jqlang/jq/releases/latest"
+          ]
+        }
+      ]
+    },
+    "storage": true,
+    "clipboard": {
+      "write": true
+    }
+  }
+}
